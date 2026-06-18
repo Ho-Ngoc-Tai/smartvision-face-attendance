@@ -62,6 +62,16 @@ lerna-debug.log*
 .env.local
 .env.development.local
 .env.test.local
-.env.production.local
 .env.env
 *.env
+
+# Large Model weight files & binaries
+models/
+*.onnx
+*.pt
+*.h5
+
+# Local Databases and runtime data
+data/
+*.pkl
+*.csv

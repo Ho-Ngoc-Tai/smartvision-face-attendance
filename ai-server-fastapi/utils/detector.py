@@ -5,64 +5,90 @@ import os
 class FaceDetector:
     """
     Giai đoạn 1: Phát hiện khuôn mặt (Face Detection).
-    Sử dụng YOLOv8-Face làm mặc định trong thiết kế thạc sĩ.
-    Trong mã nguồn mẫu này, để đảm bảo hệ thống có thể chạy ngay lập tức mà không yêu cầu GPU hoặc
-    tải trọng lượng mô hình quá nặng (.pt), chúng tôi triển khai thêm bộ phát hiện OpenCV Haar Cascade dự phòng.
+    Sử dụng YuNet ONNX (OpenCV DNN) làm mô hình học sâu mặc định.
+    Hỗ trợ phát hiện Landmark khuôn mặt phục vụ căn chỉnh (Face Alignment).
+    Nếu không tải được mô hình, tự động fallback về Haar Cascade.
     """
-    def __init__(self, model_path: str = "models/yolov8n-face.pt"):
+    def __init__(self, model_path: str = None):
+        if model_path is None:
+            # Đường dẫn mặc định đến thư mục models
+            model_path = os.path.abspath(os.path.join(
+                os.path.dirname(__file__), "..", "models", "face_detection_yunet_2023mar.onnx"
+            ))
+            
         self.model_path = model_path
-        self.use_yolo = False
+        self.use_yunet = False
+        self.detector = None
         
-        # Thử tải mô hình YOLOv8-Face nếu thư viện ultralytics đã được cài đặt và file mô hình tồn tại
+        # Thử khởi tạo YuNet
         if os.path.exists(model_path):
             try:
-                from ultralytics import YOLO
-                self.model = YOLO(model_path)
-                self.use_yolo = True
-                print("[DETECTOR] Đã tải thành công mô hình YOLOv8-Face.")
-            except ImportError:
-                print("[DETECTOR] Chưa cài đặt 'ultralytics'. Sử dụng OpenCV Haar Cascade làm dự phòng.")
+                # Tạo bộ phát hiện FaceDetectorYN của OpenCV
+                # Đầu vào kích thước ban đầu giả lập (320, 320), sẽ thay đổi động theo ảnh thực tế
+                self.detector = cv2.FaceDetectorYN.create(
+                    model_path,
+                    "",
+                    (320, 320),
+                    score_threshold=0.6,
+                    nms_threshold=0.3,
+                    top_k=5000
+                )
+                self.use_yunet = True
+                print(f"[DETECTOR] Đã tải thành công mô hình YuNet từ: {model_path}")
+            except Exception as e:
+                print(f"[DETECTOR] Lỗi khi khởi tạo YuNet: {e}. Chuyển sang Haar Cascade.")
         else:
-            print(f"[DETECTOR] Không tìm thấy file {model_path}. Sử dụng OpenCV Haar Cascade làm dự phòng.")
+            print(f"[DETECTOR] Không tìm thấy file mô hình tại {model_path}. Chuyển sang Haar Cascade.")
             
-        # Khởi tạo OpenCV Haar Cascade làm dự phòng để demo chạy ngay lập tức
-        if not self.use_yolo:
-            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-            self.cascade = cv2.CascadeClassifier(cascade_path)
-            print("[DETECTOR] Đã khởi tạo OpenCV Haar Cascade.")
+        # Khởi tạo Haar Cascade làm dự phòng
+        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        self.cascade = cv2.CascadeClassifier(cascade_path)
+        print("[DETECTOR] Đã khởi tạo OpenCV Haar Cascade làm dự phòng.")
 
-    def detect(self, img_np: np.ndarray) -> list:
+    def detect(self, img_np: np.ndarray) -> tuple:
         """
         Nhận vào ảnh dạng numpy array (BGR).
-        Trả về danh sách các bounding box: [[x_min, y_min, x_max, y_max]]
+        Trả về tuple: (boxes, faces_raw)
+        - boxes: Danh sách các bounding box [[x_min, y_min, x_max, y_max], ...]
+        - faces_raw: Array chứa Landmark và thông tin thô từ YuNet (phục vụ SFace align), hoặc None nếu dùng Haar Cascade.
         """
         boxes = []
+        faces_raw = None
         h, w, _ = img_np.shape
 
-        if self.use_yolo:
-            # Hiện thực hóa dự đoán bằng YOLOv8-Face
-            results = self.model(img_np, verbose=False)
-            for r in results:
-                # r.boxes chứa tọa độ xyxy
-                for box in r.boxes:
-                    xyxy = box.xyxy[0].cpu().numpy()
-                    # Định dạng x_min, y_min, x_max, y_max
-                    boxes.append([
-                        int(xyxy[0]), int(xyxy[1]), 
-                        int(xyxy[2]), int(xyxy[3])
-                    ])
-        else:
-            # Sử dụng bộ nhận diện Haar Cascade dự phòng
+        if self.use_yunet and self.detector is not None:
+            try:
+                # Cài đặt kích thước ảnh đầu vào động
+                self.detector.setInputSize((w, h))
+                retval, faces = self.detector.detect(img_np)
+                
+                if retval and faces is not None:
+                    faces_raw = faces
+                    for face in faces:
+                        # face[0:4] là [x, y, width, height]
+                        x = int(face[0])
+                        y = int(face[1])
+                        width = int(face[2])
+                        height = int(face[3])
+                        
+                        x_min = int(max(0, x).item()) if hasattr(max(0, x), "item") else int(max(0, x))
+                        y_min = int(max(0, y).item()) if hasattr(max(0, y), "item") else int(max(0, y))
+                        x_max = int(min(w, x + width).item()) if hasattr(min(w, x + width), "item") else int(min(w, x + width))
+                        y_max = int(min(h, y + height).item()) if hasattr(min(h, y + height), "item") else int(min(h, y + height))
+                        
+                        boxes.append([x_min, y_min, x_max, y_max])
+            except Exception as e:
+                print(f"[DETECTOR] Lỗi khi nhận diện bằng YuNet: {e}")
+                
+        # Fallback về Haar Cascade nếu không dùng YuNet hoặc YuNet không phát hiện ra mặt
+        if len(boxes) == 0:
             gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
             faces = self.cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
             for (x, y, w_f, h_f) in faces:
-                boxes.append([x, y, x + w_f, y + h_f])
-
-        # Trong trường hợp ảnh thử nghiệm không bắt được mặt (do webcam giả lập hoặc môi trường tối),
-        # Trả về toàn bộ ảnh như một bounding box lớn để demo không bị gián đoạn.
-        if len(boxes) == 0:
-            # MOCKUP: Giả định toàn bộ ảnh là khuôn mặt nếu không nhận diện được để tránh lỗi demo
-            # Thực tế: Khi có camera thật, hãy bỏ phần mock này đi.
-            pass
-
-        return boxes
+                x_min = int(max(0, x).item()) if hasattr(max(0, x), "item") else int(max(0, x))
+                y_min = int(max(0, y).item()) if hasattr(max(0, y), "item") else int(max(0, y))
+                x_max = int(min(w, x + w_f).item()) if hasattr(min(w, x + w_f), "item") else int(min(w, x + w_f))
+                y_max = int(min(h, y + h_f).item()) if hasattr(min(h, y + h_f), "item") else int(min(h, y + h_f))
+                boxes.append([x_min, y_min, x_max, y_max])
+                
+        return boxes, faces_raw
